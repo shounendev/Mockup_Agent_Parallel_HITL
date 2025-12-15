@@ -48,12 +48,10 @@ input_model = F.Model(
     4. Generate 6 variations in parallel
     5. Download all mockups
     """),
-
     F.InputFiles(
         name="screenshot",
         label="Upload Screenshot",
     ),
-
     F.Submit("Analyze Screenshot"),
     F.Cancel("Cancel"),
 )
@@ -62,6 +60,7 @@ input_model = F.Model(
 # ============================================================================
 # STATE SCHEMA
 # ============================================================================
+
 
 class MockupGraphState(TypedDict):
     tracer: Tracer
@@ -85,7 +84,9 @@ class MockupGraphState(TypedDict):
     filled_prompt: str
 
     # Parallel generation results
-    mockup_results: List[dict]  # List of 6 Ray remote results (now with "file_path" instead of "data")
+    mockup_results: List[
+        dict
+    ]  # List of 6 Ray remote results (now with "file_path" instead of "data")
     uploaded_mockups: List[dict]  # List of uploaded mockup metadata
     upload_timestamp: Optional[str]
     temp_output_dir: Optional[str]  # Temporary directory for generated files
@@ -117,13 +118,14 @@ The screenshot should be the brightest element in the scene, with natural lighti
 # RAY REMOTE FUNCTION FOR PARALLEL GENERATION
 # ============================================================================
 
+
 @ray.remote
 def generate_single_mockup(
     prompt: str,
     cropped_screenshot_path: str,
     gemini_api_key: str,
     variation_index: int,
-    output_dir: str
+    output_dir: str,
 ) -> dict:
     """
     Ray remote function to generate a single mockup.
@@ -180,16 +182,18 @@ def generate_single_mockup(
             }
 
         file_extension = mimetypes.guess_extension(mockup_mime)
-        mockup_format = file_extension.lstrip('.') if file_extension else 'jpeg'
+        mockup_format = file_extension.lstrip(".") if file_extension else "jpeg"
 
         # Write to disk immediately - do NOT hold in memory
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         unique_id = str(uuid.uuid4())[:8]
-        filename = f"mockup_var{variation_index}_{timestamp}_{unique_id}.{mockup_format}"
+        filename = (
+            f"mockup_var{variation_index}_{timestamp}_{unique_id}.{mockup_format}"
+        )
         file_path = os.path.join(output_dir, filename)
 
-        with open(file_path, 'wb') as f:
+        with open(file_path, "wb") as f:
             f.write(mockup_data)
 
         # Get file size from disk
@@ -219,7 +223,10 @@ def generate_single_mockup(
 # PROMPT VARIATIONS FUNCTION
 # ============================================================================
 
-def generate_prompt_variations(base_params: dict, template: jinja2.Template) -> List[str]:
+
+def generate_prompt_variations(
+    base_params: dict, template: jinja2.Template
+) -> List[str]:
     """Generate 6 slightly different prompts based on base parameters"""
 
     # Variation strategies
@@ -286,6 +293,7 @@ def generate_prompt_variations(base_params: dict, template: jinja2.Template) -> 
 # ANALYSIS NODES (Before HITL)
 # ============================================================================
 
+
 async def validate_and_load_screenshot(state: MockupGraphState) -> MockupGraphState:
     """Node 1: Validate uploaded file and load it into state"""
     tracer = state["tracer"]
@@ -324,7 +332,9 @@ async def validate_and_load_screenshot(state: MockupGraphState) -> MockupGraphSt
                 width, height = img.size
                 img_copy = img.copy()
 
-            await tracer.markdown(f"✅ Screenshot uploaded: {width}x{height}px, format: {img_format}")
+            await tracer.markdown(
+                f"✅ Screenshot uploaded: {width}x{height}px, format: {img_format}"
+            )
 
             state["screenshot_local_path"] = local_path
             return state
@@ -353,7 +363,9 @@ async def crop_to_16_9(state: MockupGraphState) -> MockupGraphState:
         current_aspect = original_width / original_height
 
         if abs(current_aspect - target_aspect) < 0.01:
-            await tracer.markdown(f"✅ Image is already 16:9 ({original_width}x{original_height})")
+            await tracer.markdown(
+                f"✅ Image is already 16:9 ({original_width}x{original_height})"
+            )
             state["cropped_screenshot_path"] = screenshot_path
             return state
 
@@ -379,10 +391,14 @@ async def crop_to_16_9(state: MockupGraphState) -> MockupGraphState:
         # Save cropped image
         temp_dir = os.path.join("data", "temp")
         os.makedirs(temp_dir, exist_ok=True)
-        cropped_path = os.path.join(temp_dir, f"cropped_{os.path.basename(screenshot_path)}")
+        cropped_path = os.path.join(
+            temp_dir, f"cropped_{os.path.basename(screenshot_path)}"
+        )
         cropped_img.save(cropped_path)
 
-        await tracer.markdown(f"✅ Cropped from {original_width}x{original_height} to {new_width}x{new_height}")
+        await tracer.markdown(
+            f"✅ Cropped from {original_width}x{original_height} to {new_width}x{new_height}"
+        )
 
         state["cropped_screenshot_path"] = cropped_path
         return state
@@ -402,9 +418,7 @@ async def query_openai_for_parameters(state: MockupGraphState) -> MockupGraphSta
         await tracer.markdown("🔍 Analyzing screenshot with AI vision...")
 
         llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.7
+            model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"), temperature=0.7
         )
 
         screenshot_path = state["cropped_screenshot_path"]
@@ -468,6 +482,7 @@ Respond ONLY with valid JSON:
 # GENERATION NODES (After HITL)
 # ============================================================================
 
+
 async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGraphState:
     """Generate 6 mockups in parallel using Ray"""
     tracer = state["tracer"]
@@ -492,6 +507,7 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
 
     # Create temporary output directory for generated images
     from datetime import datetime
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     temp_output_dir = os.path.join("output", f"temp_mockups_{timestamp}")
     os.makedirs(temp_output_dir, exist_ok=True)
@@ -502,7 +518,7 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
             cropped_screenshot_path=cropped_path,
             gemini_api_key=gemini_api_key,
             variation_index=i,
-            output_dir=temp_output_dir  # Pass output directory to write files
+            output_dir=temp_output_dir,  # Pass output directory to write files
         )
         for i in range(6)
     ]
@@ -522,9 +538,13 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
             await tracer.markdown(f"### ✅ Generated mockup {completed_count}/6")
 
             if not result["success"]:
-                await tracer.markdown(f"⚠️ Variation {result['variation_index']} failed: {result['error']}")
+                await tracer.markdown(
+                    f"⚠️ Variation {result['variation_index']} failed: {result['error']}"
+                )
             else:
-                await tracer.markdown(f"📊 Size: {result['size_bytes'] / 1024 / 1024:.2f} MB")
+                await tracer.markdown(
+                    f"📊 Size: {result['size_bytes'] / 1024 / 1024:.2f} MB"
+                )
 
         await asyncio.sleep(0.1)
 
@@ -554,7 +574,9 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
         state["errors"].append(error)
         return state
 
-    await tracer.markdown(f"## Uploading {len(successful_results)} Mockups to Digital Ocean Spaces")
+    await tracer.markdown(
+        f"## Uploading {len(successful_results)} Mockups to Digital Ocean Spaces"
+    )
 
     # Validate environment variables
     spaces_endpoint = os.getenv("SPACES_ENDPOINT")
@@ -565,10 +587,14 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
 
     if not all([spaces_endpoint, spaces_key, spaces_secret, bucket_name]):
         missing = []
-        if not spaces_endpoint: missing.append("SPACES_ENDPOINT")
-        if not spaces_key: missing.append("SPACES_KEY")
-        if not spaces_secret: missing.append("SPACES_SECRET")
-        if not bucket_name: missing.append("SPACES_BUCKET")
+        if not spaces_endpoint:
+            missing.append("SPACES_ENDPOINT")
+        if not spaces_key:
+            missing.append("SPACES_KEY")
+        if not spaces_secret:
+            missing.append("SPACES_SECRET")
+        if not bucket_name:
+            missing.append("SPACES_BUCKET")
 
         error = f"Missing environment variables: {', '.join(missing)}"
         await tracer.markdown(f"❌ {error}")
@@ -602,7 +628,7 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
             s3_key = f"mockups/batch_{timestamp}/mockup_var{variation_idx}_{unique_id}{extension}"
 
             # Upload directly from disk file
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 s3_client.upload_fileobj(
                     f,
                     bucket_name,
@@ -617,13 +643,15 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
             # Construct public URL
             public_url = f"{spaces_endpoint}/{bucket_name}/{s3_key}"
 
-            uploaded_mockups.append({
-                "variation_index": variation_idx,
-                "public_url": public_url,
-                "s3_key": s3_key,
-                "file_size_bytes": result["size_bytes"],
-                "format": img_format,
-            })
+            uploaded_mockups.append(
+                {
+                    "variation_index": variation_idx,
+                    "public_url": public_url,
+                    "s3_key": s3_key,
+                    "file_size_bytes": result["size_bytes"],
+                    "format": img_format,
+                }
+            )
 
             await tracer.markdown(f"✅ Uploaded variation {variation_idx + 1}")
 
@@ -631,15 +659,21 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
             try:
                 os.remove(file_path)
             except Exception as del_err:
-                await tracer.markdown(f"⚠️ Could not delete temp file {file_path}: {del_err}")
+                await tracer.markdown(
+                    f"⚠️ Could not delete temp file {file_path}: {del_err}"
+                )
 
         except Exception as e:
-            await tracer.markdown(f"⚠️ Upload failed for variation {variation_idx}: {str(e)}")
+            await tracer.markdown(
+                f"⚠️ Upload failed for variation {variation_idx}: {str(e)}"
+            )
 
     state["uploaded_mockups"] = uploaded_mockups
     state["upload_timestamp"] = timestamp
 
-    await tracer.markdown(f"## 🎉 Upload Complete: {len(uploaded_mockups)} mockups available")
+    await tracer.markdown(
+        f"## 🎉 Upload Complete: {len(uploaded_mockups)} mockups available"
+    )
 
     return state
 
@@ -652,6 +686,7 @@ async def cleanup_temp_files(state: MockupGraphState) -> MockupGraphState:
     if temp_dir and os.path.exists(temp_dir):
         try:
             import shutil
+
             shutil.rmtree(temp_dir)
             await tracer.markdown(f"🧹 Cleaned up temporary files from {temp_dir}")
         except Exception as e:
@@ -691,16 +726,31 @@ generation_graph = generation_workflow.compile()
 # HITL FEEDBACK FORM
 # ============================================================================
 
+
 @app.lock(name="parameter_confirmation")
-async def collect_parameter_feedback(request: fastapi.Request, inputs: Optional[dict] = None):
+async def collect_parameter_feedback(
+    request: fastapi.Request, inputs: Optional[dict] = None
+):
     """HITL form for parameter confirmation/editing"""
 
     # Pre-fill with AI-detected values from inputs dict
-    ai_device = inputs.get('ai_device', 'Apple Pro Display XDR') if inputs else 'Apple Pro Display XDR'
-    ai_interior_style = inputs.get('ai_interior_style', 'modern, minimalist') if inputs else 'modern, minimalist'
-    ai_profession = inputs.get('ai_profession', 'UX designer') if inputs else 'UX designer'
-    ai_mood = inputs.get('ai_mood', 'focused, creative') if inputs else 'focused, creative'
-    ai_time_of_day = inputs.get('ai_time_of_day', 'morning') if inputs else 'morning'
+    ai_device = (
+        inputs.get("ai_device", "Apple Pro Display XDR")
+        if inputs
+        else "Apple Pro Display XDR"
+    )
+    ai_interior_style = (
+        inputs.get("ai_interior_style", "modern, minimalist")
+        if inputs
+        else "modern, minimalist"
+    )
+    ai_profession = (
+        inputs.get("ai_profession", "UX designer") if inputs else "UX designer"
+    )
+    ai_mood = (
+        inputs.get("ai_mood", "focused, creative") if inputs else "focused, creative"
+    )
+    ai_time_of_day = inputs.get("ai_time_of_day", "morning") if inputs else "morning"
 
     feedback_form = F.Model(
         F.Markdown("""
@@ -708,46 +758,41 @@ async def collect_parameter_feedback(request: fastapi.Request, inputs: Optional[
 
         The AI has analyzed your screenshot. Review and edit the parameters below, then submit to generate 6 mockup variations.
         """),
-
         F.InputText(
             name="device",
             label="Display Device",
             value=ai_device,
             placeholder="e.g., Apple Pro Display XDR",
         ),
-
         F.InputText(
             name="interior_style",
             label="Interior Style",
             value=ai_interior_style,
             placeholder="e.g., minimalist modern, cozy creative",
         ),
-
         F.InputText(
             name="profession",
             label="Space Owner Profession",
             value=ai_profession,
             placeholder="e.g., UX designer, software developer",
         ),
-
         F.InputText(
             name="mood",
             label="Atmosphere/Mood",
             value=ai_mood,
             placeholder="e.g., bright and inspiring, focused and calm",
         ),
-
         F.InputText(
             name="time_of_day",
             label="Time of Day (Base)",
             value=ai_time_of_day,
             placeholder="morning, afternoon, evening, night",
         ),
-
-        F.Markdown("**Note:** 6 variations will be generated with slight modifications to these base parameters."),
-
+        F.Markdown(
+            "**Note:** 6 variations will be generated with slight modifications to these base parameters."
+        ),
         F.Submit("Generate 6 Mockups"),
-        F.Cancel("Cancel")
+        F.Cancel("Cancel"),
     )
 
     return feedback_form
@@ -756,6 +801,7 @@ async def collect_parameter_feedback(request: fastapi.Request, inputs: Optional[
 # ============================================================================
 # GALLERY HTML BUILDER
 # ============================================================================
+
 
 def build_gallery_html(result: dict) -> HTML:
     """Build HTML gallery showing all 6 mockups"""
@@ -768,34 +814,62 @@ def build_gallery_html(result: dict) -> HTML:
         html.append("<p>No mockups were successfully generated.</p>")
         return HTML("\n".join(html))
 
-    html.append(f"<p><strong>{len(uploaded_mockups)} variations</strong> generated and uploaded successfully.</p>")
+    html.append(
+        f"<p><strong>{len(uploaded_mockups)} variations</strong> generated and uploaded successfully.</p>"
+    )
 
     # Parameters used
     html.append("<h3>Parameters Used</h3>")
-    html.append("<table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>")
-    html.append("<tr><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Parameter</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Value</th></tr>")
-    html.append(f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Device</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['device']}</td></tr>")
-    html.append(f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Interior Style</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['interior_style']}</td></tr>")
-    html.append(f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Profession</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['profession']}</td></tr>")
-    html.append(f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Mood</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['mood']}</td></tr>")
-    html.append(f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Time of Day</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['time_of_day']}</td></tr>")
+    html.append(
+        "<table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>"
+    )
+    html.append(
+        "<tr><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Parameter</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Value</th></tr>"
+    )
+    html.append(
+        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Device</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['device']}</td></tr>"
+    )
+    html.append(
+        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Interior Style</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['interior_style']}</td></tr>"
+    )
+    html.append(
+        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Profession</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['profession']}</td></tr>"
+    )
+    html.append(
+        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Mood</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['mood']}</td></tr>"
+    )
+    html.append(
+        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Time of Day</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['time_of_day']}</td></tr>"
+    )
     html.append("</table>")
 
     # Gallery of mockups
     html.append("<h3>Generated Mockups</h3>")
-    html.append("<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-top: 20px;'>")
+    html.append(
+        "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-top: 20px;'>"
+    )
 
     for mockup in sorted(uploaded_mockups, key=lambda x: x["variation_index"]):
         idx = mockup["variation_index"]
         url = mockup["public_url"]
         size_mb = mockup["file_size_bytes"] / 1024 / 1024
 
-        html.append("<div style='border: 2px solid #4CAF50; border-radius: 8px; padding: 15px; background: #f9f9f9;'>")
+        html.append(
+            "<div style='border: 2px solid #4CAF50; border-radius: 8px; padding: 15px; background: #f9f9f9;'>"
+        )
         html.append(f"<h4>Variation {idx + 1}</h4>")
-        html.append(f"<img src='{url}' style='width: 100%; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);' />")
-        html.append(f"<p style='margin-top: 10px;'><strong>Size:</strong> {size_mb:.2f} MB</p>")
-        html.append(f"<p><a href='{url}' target='_blank' download style='color: #4CAF50; font-weight: bold;'>⬇️ Download</a></p>")
-        html.append(f"<p style='font-size: 0.85em; word-break: break-all;'><strong>URL:</strong> <code>{url}</code></p>")
+        html.append(
+            f"<img src='{url}' style='width: 100%; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);' />"
+        )
+        html.append(
+            f"<p style='margin-top: 10px;'><strong>Size:</strong> {size_mb:.2f} MB</p>"
+        )
+        html.append(
+            f"<p><a href='{url}' target='_blank' download style='color: #4CAF50; font-weight: bold;'>⬇️ Download</a></p>"
+        )
+        html.append(
+            f"<p style='font-size: 0.85em; word-break: break-all;'><strong>URL:</strong> <code>{url}</code></p>"
+        )
         html.append("</div>")
 
     html.append("</div>")
@@ -806,6 +880,7 @@ def build_gallery_html(result: dict) -> HTML:
 # ============================================================================
 # RUNNER FUNCTION WITH HITL
 # ============================================================================
+
 
 async def runner(inputs: dict, tracer: Tracer):
     """Main runner with HITL step"""
@@ -853,7 +928,9 @@ async def runner(inputs: dict, tracer: Tracer):
     await tracer.markdown("## Phase 2: Human-in-the-Loop Parameter Confirmation")
     await tracer.markdown("📊 **AI-Detected Parameters:**")
     await tracer.markdown(f"- **Device:** {analysis_result['ai_device']}")
-    await tracer.markdown(f"- **Interior Style:** {analysis_result['ai_interior_style']}")
+    await tracer.markdown(
+        f"- **Interior Style:** {analysis_result['ai_interior_style']}"
+    )
     await tracer.markdown(f"- **Profession:** {analysis_result['ai_profession']}")
     await tracer.markdown(f"- **Mood:** {analysis_result['ai_mood']}")
     await tracer.markdown(f"- **Time of Day:** {analysis_result['ai_time_of_day']}")
@@ -861,20 +938,29 @@ async def runner(inputs: dict, tracer: Tracer):
     await tracer.markdown("👉 Please review and edit the parameters below...")
 
     # Pause for human feedback - pass AI values to the lock form
-    feedback = await tracer.lock('parameter_confirmation', {
-        'ai_device': analysis_result['ai_device'],
-        'ai_interior_style': analysis_result['ai_interior_style'],
-        'ai_profession': analysis_result['ai_profession'],
-        'ai_mood': analysis_result['ai_mood'],
-        'ai_time_of_day': analysis_result['ai_time_of_day'],
-    })
+    feedback = await tracer.lock(
+        "parameter_confirmation",
+        {
+            "ai_device": analysis_result["ai_device"],
+            "ai_interior_style": analysis_result["ai_interior_style"],
+            "ai_profession": analysis_result["ai_profession"],
+            "ai_mood": analysis_result["ai_mood"],
+            "ai_time_of_day": analysis_result["ai_time_of_day"],
+        },
+    )
 
     # Extract final parameters from feedback
     analysis_result["device"] = feedback.get("device", analysis_result["ai_device"])
-    analysis_result["interior_style"] = feedback.get("interior_style", analysis_result["ai_interior_style"])
-    analysis_result["profession"] = feedback.get("profession", analysis_result["ai_profession"])
+    analysis_result["interior_style"] = feedback.get(
+        "interior_style", analysis_result["ai_interior_style"]
+    )
+    analysis_result["profession"] = feedback.get(
+        "profession", analysis_result["ai_profession"]
+    )
     analysis_result["mood"] = feedback.get("mood", analysis_result["ai_mood"])
-    analysis_result["time_of_day"] = feedback.get("time_of_day", analysis_result["ai_time_of_day"])
+    analysis_result["time_of_day"] = feedback.get(
+        "time_of_day", analysis_result["ai_time_of_day"]
+    )
 
     await tracer.markdown("## Phase 3: Parallel Generation")
     await tracer.markdown("✅ Parameters confirmed, starting parallel generation...")
@@ -898,6 +984,7 @@ async def runner(inputs: dict, tracer: Tracer):
 # FASTAPI ENDPOINT
 # ============================================================================
 
+
 @app.enter(
     path="/",
     model=input_model,
@@ -909,7 +996,7 @@ async def runner(inputs: dict, tracer: Tracer):
     organization="NMKR",
 )
 async def enter(request: fastapi.Request, inputs: dict):
-    return Launch(request, "app:runner", inputs=inputs)
+    return Launch(request, "Mockup_Agent_Parallel_HITL.app:runner", inputs=inputs)
 
 
 # ============================================================================
@@ -918,10 +1005,12 @@ async def enter(request: fastapi.Request, inputs: dict):
 
 from ray import serve
 
+
 @serve.deployment
 @serve.ingress(app)
 class ParallelMockupAgent:
     pass
+
 
 fast_app = ParallelMockupAgent.bind()
 
@@ -932,4 +1021,5 @@ fast_app = ParallelMockupAgent.bind()
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("app:app", host="0.0.0.0", port=8014, reload=True)
