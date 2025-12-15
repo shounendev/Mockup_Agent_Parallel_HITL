@@ -85,9 +85,10 @@ class MockupGraphState(TypedDict):
     filled_prompt: str
 
     # Parallel generation results
-    mockup_results: List[dict]  # List of 6 Ray remote results
+    mockup_results: List[dict]  # List of 6 Ray remote results (now with "file_path" instead of "data")
     uploaded_mockups: List[dict]  # List of uploaded mockup metadata
     upload_timestamp: Optional[str]
+    temp_output_dir: Optional[str]  # Temporary directory for generated files
 
     errors: List[str]
 
@@ -121,16 +122,20 @@ def generate_single_mockup(
     prompt: str,
     cropped_screenshot_path: str,
     gemini_api_key: str,
-    variation_index: int
+    variation_index: int,
+    output_dir: str
 ) -> dict:
     """
     Ray remote function to generate a single mockup.
-    Returns dict with image data, format, and metadata.
+    Writes to disk immediately, returns dict with file path (NOT image data).
     """
     from google import genai
     from google.genai import types
     from PIL import Image
     import mimetypes
+    import os
+    from datetime import datetime
+    import uuid
 
     try:
         client = genai.Client(api_key=gemini_api_key)
@@ -170,21 +175,34 @@ def generate_single_mockup(
                 "variation_index": variation_index,
                 "success": False,
                 "error": "No image data received from Gemini",
-                "data": None,
+                "file_path": None,
                 "mime": None,
             }
 
         file_extension = mimetypes.guess_extension(mockup_mime)
         mockup_format = file_extension.lstrip('.') if file_extension else 'jpeg'
 
+        # Write to disk immediately - do NOT hold in memory
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"mockup_var{variation_index}_{timestamp}_{unique_id}.{mockup_format}"
+        file_path = os.path.join(output_dir, filename)
+
+        with open(file_path, 'wb') as f:
+            f.write(mockup_data)
+
+        # Get file size from disk
+        file_size = os.path.getsize(file_path)
+
         return {
             "variation_index": variation_index,
             "success": True,
             "error": None,
-            "data": mockup_data,
+            "file_path": file_path,  # Return path, NOT data
             "mime": mockup_mime,
             "format": mockup_format,
-            "size_bytes": len(mockup_data),
+            "size_bytes": file_size,
         }
 
     except Exception as e:
@@ -192,7 +210,7 @@ def generate_single_mockup(
             "variation_index": variation_index,
             "success": False,
             "error": str(e),
-            "data": None,
+            "file_path": None,
             "mime": None,
         }
 
@@ -472,12 +490,19 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     cropped_path = state["cropped_screenshot_path"]
 
+    # Create temporary output directory for generated images
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_output_dir = os.path.join("output", f"temp_mockups_{timestamp}")
+    os.makedirs(temp_output_dir, exist_ok=True)
+
     futures = [
         generate_single_mockup.remote(
             prompt=prompts[i],
             cropped_screenshot_path=cropped_path,
             gemini_api_key=gemini_api_key,
-            variation_index=i
+            variation_index=i,
+            output_dir=temp_output_dir  # Pass output directory to write files
         )
         for i in range(6)
     ]
@@ -508,6 +533,7 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
 
     # Store in state
     state["mockup_results"] = results
+    state["temp_output_dir"] = temp_output_dir  # Track temp directory for cleanup
 
     successful_count = sum(1 for r in results if r["success"])
     await tracer.markdown(f"## 🎉 Generation Complete: {successful_count}/6 successful")
@@ -564,7 +590,7 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
 
     for result in successful_results:
         variation_idx = result["variation_index"]
-        mockup_data = result["data"]
+        file_path = result["file_path"]  # Get file path instead of data
         img_format = result["format"]
 
         await tracer.markdown(f"☁️ Uploading variation {variation_idx + 1}...")
@@ -575,21 +601,18 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
             extension = f".{img_format}"
             s3_key = f"mockups/batch_{timestamp}/mockup_var{variation_idx}_{unique_id}{extension}"
 
-            # Prepare buffer
-            buffer = BytesIO(mockup_data)
-            buffer.seek(0)
-
-            # Upload
-            s3_client.upload_fileobj(
-                buffer,
-                bucket_name,
-                s3_key,
-                ExtraArgs={
-                    "ACL": "public-read",
-                    "ContentType": f"image/{img_format}",
-                    "CacheControl": "max-age=31536000",
-                },
-            )
+            # Upload directly from disk file
+            with open(file_path, 'rb') as f:
+                s3_client.upload_fileobj(
+                    f,
+                    bucket_name,
+                    s3_key,
+                    ExtraArgs={
+                        "ACL": "public-read",
+                        "ContentType": f"image/{img_format}",
+                        "CacheControl": "max-age=31536000",
+                    },
+                )
 
             # Construct public URL
             public_url = f"{spaces_endpoint}/{bucket_name}/{s3_key}"
@@ -604,6 +627,12 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
 
             await tracer.markdown(f"✅ Uploaded variation {variation_idx + 1}")
 
+            # Delete temp file after successful upload
+            try:
+                os.remove(file_path)
+            except Exception as del_err:
+                await tracer.markdown(f"⚠️ Could not delete temp file {file_path}: {del_err}")
+
         except Exception as e:
             await tracer.markdown(f"⚠️ Upload failed for variation {variation_idx}: {str(e)}")
 
@@ -611,6 +640,22 @@ async def upload_all_to_spaces_node(state: MockupGraphState) -> MockupGraphState
     state["upload_timestamp"] = timestamp
 
     await tracer.markdown(f"## 🎉 Upload Complete: {len(uploaded_mockups)} mockups available")
+
+    return state
+
+
+async def cleanup_temp_files(state: MockupGraphState) -> MockupGraphState:
+    """Clean up temporary generated files after upload"""
+    tracer = state["tracer"]
+
+    temp_dir = state.get("temp_output_dir")
+    if temp_dir and os.path.exists(temp_dir):
+        try:
+            import shutil
+            shutil.rmtree(temp_dir)
+            await tracer.markdown(f"🧹 Cleaned up temporary files from {temp_dir}")
+        except Exception as e:
+            await tracer.markdown(f"⚠️ Cleanup warning: {str(e)}")
 
     return state
 
@@ -634,9 +679,11 @@ analysis_graph = analysis_workflow.compile()
 generation_workflow = StateGraph(MockupGraphState)
 generation_workflow.add_node("parallel_generation", parallel_mockup_generation_node)
 generation_workflow.add_node("upload_all", upload_all_to_spaces_node)
+generation_workflow.add_node("cleanup", cleanup_temp_files)
 generation_workflow.add_edge(START, "parallel_generation")
 generation_workflow.add_edge("parallel_generation", "upload_all")
-generation_workflow.add_edge("upload_all", END)
+generation_workflow.add_edge("upload_all", "cleanup")
+generation_workflow.add_edge("cleanup", END)
 generation_graph = generation_workflow.compile()
 
 
