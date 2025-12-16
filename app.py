@@ -143,34 +143,34 @@ def generate_single_mockup(
         client = genai.Client(api_key=gemini_api_key)
         model = "gemini-3-pro-image-preview"
 
-        cropped_screenshot = Image.open(cropped_screenshot_path)
-        contents = [prompt, cropped_screenshot]
+        with Image.open(cropped_screenshot_path) as cropped_screenshot:
+            contents = [prompt, cropped_screenshot]
 
-        tools = [types.Tool(googleSearch=types.GoogleSearch())]
-        generate_content_config = types.GenerateContentConfig(
-            response_modalities=["IMAGE", "TEXT"],
-            image_config=types.ImageConfig(image_size="2K"),
-            tools=tools,
-        )
+            tools = [types.Tool(googleSearch=types.GoogleSearch())]
+            generate_content_config = types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                image_config=types.ImageConfig(image_size="2K"),
+                tools=tools,
+            )
 
-        mockup_data = None
-        mockup_mime = None
+            mockup_data = None
+            mockup_mime = None
 
-        for chunk in client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=generate_content_config,
-        ):
-            if (
-                chunk.candidates
-                and chunk.candidates[0].content
-                and chunk.candidates[0].content.parts
-                and chunk.candidates[0].content.parts[0].inline_data
-                and chunk.candidates[0].content.parts[0].inline_data.data
+            for chunk in client.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=generate_content_config,
             ):
-                inline_data = chunk.candidates[0].content.parts[0].inline_data
-                mockup_data = inline_data.data
-                mockup_mime = inline_data.mime_type
+                if (
+                    chunk.candidates
+                    and chunk.candidates[0].content
+                    and chunk.candidates[0].content.parts
+                    and chunk.candidates[0].content.parts[0].inline_data
+                    and chunk.candidates[0].content.parts[0].inline_data.data
+                ):
+                    inline_data = chunk.candidates[0].content.parts[0].inline_data
+                    mockup_data = inline_data.data
+                    mockup_mime = inline_data.mime_type
 
         if not mockup_data:
             return {
@@ -330,7 +330,6 @@ async def validate_and_load_screenshot(state: MockupGraphState) -> MockupGraphSt
             with Image.open(local_path) as img:
                 img_format = img.format
                 width, height = img.size
-                img_copy = img.copy()
 
             await tracer.markdown(
                 f"✅ Screenshot uploaded: {width}x{height}px, format: {img_format}"
@@ -355,46 +354,47 @@ async def crop_to_16_9(state: MockupGraphState) -> MockupGraphState:
         return state
 
     try:
-        img = Image.open(screenshot_path)
-        original_width, original_height = img.size
+        with Image.open(screenshot_path) as img:
+            original_width, original_height = img.size
 
-        # Calculate 16:9 aspect ratio
-        target_aspect = 16 / 9
-        current_aspect = original_width / original_height
+            # Calculate 16:9 aspect ratio
+            target_aspect = 16 / 9
+            current_aspect = original_width / original_height
 
-        if abs(current_aspect - target_aspect) < 0.01:
-            await tracer.markdown(
-                f"✅ Image is already 16:9 ({original_width}x{original_height})"
+            if abs(current_aspect - target_aspect) < 0.01:
+                await tracer.markdown(
+                    f"✅ Image is already 16:9 ({original_width}x{original_height})"
+                )
+                state["cropped_screenshot_path"] = screenshot_path
+                return state
+
+            await tracer.markdown("🔲 Cropping to 16:9 aspect ratio...")
+
+            # Determine crop dimensions
+            if current_aspect > target_aspect:
+                new_width = int(original_height * target_aspect)
+                new_height = original_height
+                left = (original_width - new_width) // 2
+                top = 0
+            else:
+                new_width = original_width
+                new_height = int(original_width / target_aspect)
+                left = 0
+                top = (original_height - new_height) // 2
+
+            right = left + new_width
+            bottom = top + new_height
+
+            cropped_img = img.crop((left, top, right, bottom))
+
+            # Save cropped image
+            temp_dir = os.path.join("data", "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            cropped_path = os.path.join(
+                temp_dir, f"cropped_{os.path.basename(screenshot_path)}"
             )
-            state["cropped_screenshot_path"] = screenshot_path
-            return state
-
-        await tracer.markdown("🔲 Cropping to 16:9 aspect ratio...")
-
-        # Determine crop dimensions
-        if current_aspect > target_aspect:
-            new_width = int(original_height * target_aspect)
-            new_height = original_height
-            left = (original_width - new_width) // 2
-            top = 0
-        else:
-            new_width = original_width
-            new_height = int(original_width / target_aspect)
-            left = 0
-            top = (original_height - new_height) // 2
-
-        right = left + new_width
-        bottom = top + new_height
-
-        cropped_img = img.crop((left, top, right, bottom))
-
-        # Save cropped image
-        temp_dir = os.path.join("data", "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        cropped_path = os.path.join(
-            temp_dir, f"cropped_{os.path.basename(screenshot_path)}"
-        )
-        cropped_img.save(cropped_path)
+            cropped_img.save(cropped_path)
+            cropped_img.close()  # Explicitly close cropped image after saving
 
         await tracer.markdown(
             f"✅ Cropped from {original_width}x{original_height} to {new_width}x{new_height}"
