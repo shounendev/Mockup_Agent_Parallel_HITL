@@ -920,15 +920,32 @@ async def collect_parameter_feedback(data: dict):
     ai_mood = data.get("ai_mood", "focused, creative")
     ai_time_of_day = data.get("ai_time_of_day", "morning")
 
-    # Build label with AI-detected parameters
-    label_text = f"""AI Analysis Results - Device: {ai_device} | Interior Style: {ai_interior_style} | Profession: {ai_profession} | Mood: {ai_mood} | Time of Day: {ai_time_of_day}
-
-If you'd like to modify these parameters, describe your changes below (e.g., "make it more modern and professional" or "change to evening time, warmer mood"). Leave blank to use the AI-detected parameters as-is."""
-
     feedback_form = F.Model(
+        F.Markdown("""
+        ## AI Analysis Results
+
+        The AI analyzed your screenshot and detected the following parameters:
+        """),
+        F.Markdown(f"""
+        - **Device:** {ai_device}
+        - **Interior Style:** {ai_interior_style}
+        - **Profession:** {ai_profession}
+        - **Mood:** {ai_mood}
+        - **Time of Day:** {ai_time_of_day}
+        """),
+        F.Markdown("""
+        ---
+
+        ### Adjustments (Optional)
+
+        If you'd like to modify these parameters, describe your changes below.
+        For example: "make it more modern and professional" or "change to evening time, warmer mood"
+
+        Leave blank to use the AI-detected parameters as-is.
+        """),
         F.InputArea(
             name="adjustment",
-            label=label_text,
+            label="Adjustment Instructions",
             placeholder="e.g., make it more modern and professional, change to evening...",
             value="",
             rows=3,
