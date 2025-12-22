@@ -10,7 +10,7 @@ app = ServeAPI()
 import jinja2
 from kodosumi.core import forms as F
 from kodosumi.core import Launch, Tracer
-from kodosumi.response import HTML
+from kodosumi.response import Markdown
 import fastapi
 from pathlib import Path
 from langgraph.graph import StateGraph, START, END
@@ -138,6 +138,9 @@ def generate_single_mockup(
     import os
     from datetime import datetime
     import uuid
+    import dotenv
+
+    dotenv.load_dotenv()
 
     try:
         client = genai.Client(api_key=gemini_api_key)
@@ -422,9 +425,26 @@ async def query_openai_for_parameters(state: MockupGraphState) -> MockupGraphSta
         )
 
         screenshot_path = state["cropped_screenshot_path"]
+
+        # Detect image format
+        with Image.open(screenshot_path) as img:
+            img_format = img.format  # e.g., 'JPEG', 'PNG', 'WEBP'
+
+        # Map format to MIME type
+        format_to_mime = {
+            "JPEG": "image/jpeg",
+            "JPG": "image/jpeg",
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+            "GIF": "image/gif",
+        }
+        mime_type = format_to_mime.get(img_format, "image/jpeg")  # Default to jpeg
+
+        await tracer.markdown(f"**Debug - Image format:** {img_format}, MIME type: {mime_type}")
+
         with open(screenshot_path, "rb") as image_file:
             image_data = base64.b64encode(image_file.read()).decode("utf-8")
-            image_url = f"data:image/png;base64,{image_data}"
+            image_url = f"data:{mime_type};base64,{image_data}"
 
         prompt_text = """Analyze this website screenshot and provide parameters for generating a realistic mockup scene.
 
@@ -449,10 +469,18 @@ Respond ONLY with valid JSON:
         response = await llm.ainvoke([message])
         content = response.content
 
+        # Debug: log the raw response
+        await tracer.markdown(f"**Debug - Raw API response:** {content[:200]}")
+
         # Parse JSON
         start = content.find("{")
         end = content.rfind("}") + 1
-        params = json.loads(content[start:end])
+
+        if start == -1 or end == 0:
+            raise ValueError(f"No JSON found in response. Content: {content}")
+
+        json_str = content[start:end]
+        params = json.loads(json_str)
 
         state["ai_device"] = params.get("device", "Apple Pro Display XDR")
         state["ai_interior_style"] = params.get("interior_style", "modern, minimalist")
@@ -476,6 +504,57 @@ Respond ONLY with valid JSON:
         state["ai_time_of_day"] = "morning"
 
         return state
+
+
+async def hitl_parameter_validation_node(state: MockupGraphState) -> MockupGraphState:
+    """Node 4: HITL Parameter Validation and Confirmation
+
+    Displays AI-detected parameters, pauses for human feedback,
+    and merges user input with AI suggestions.
+    """
+    tracer = state["tracer"]
+
+    # Check if analysis succeeded
+    if not state["cropped_screenshot_path"]:
+        error = "HITL skipped - screenshot analysis failed"
+        await tracer.markdown(f"❌ {error}")
+        state["errors"].append(error)
+        return state
+
+    # Display AI-detected parameters
+    await tracer.markdown("## Phase 2: Human-in-the-Loop Parameter Confirmation")
+    await tracer.markdown("📊 **AI-Detected Parameters:**")
+    await tracer.markdown(f"- **Device:** {state['ai_device']}")
+    await tracer.markdown(f"- **Interior Style:** {state['ai_interior_style']}")
+    await tracer.markdown(f"- **Profession:** {state['ai_profession']}")
+    await tracer.markdown(f"- **Mood:** {state['ai_mood']}")
+    await tracer.markdown(f"- **Time of Day:** {state['ai_time_of_day']}")
+    await tracer.markdown("")
+    await tracer.markdown("👉 Please review and edit the parameters below...")
+
+    # Pause for user input
+    feedback = await tracer.lock(
+        "parameter_confirmation",
+        {
+            "ai_device": state["ai_device"],
+            "ai_interior_style": state["ai_interior_style"],
+            "ai_profession": state["ai_profession"],
+            "ai_mood": state["ai_mood"],
+            "ai_time_of_day": state["ai_time_of_day"],
+        },
+    )
+
+    # Merge feedback with AI suggestions
+    state["device"] = feedback.get("device", state["ai_device"])
+    state["interior_style"] = feedback.get("interior_style", state["ai_interior_style"])
+    state["profession"] = feedback.get("profession", state["ai_profession"])
+    state["mood"] = feedback.get("mood", state["ai_mood"])
+    state["time_of_day"] = feedback.get("time_of_day", state["ai_time_of_day"])
+
+    await tracer.markdown("## Phase 3: Parallel Generation")
+    await tracer.markdown("✅ Parameters confirmed, starting parallel generation...")
+
+    return state
 
 
 # ============================================================================
@@ -696,30 +775,33 @@ async def cleanup_temp_files(state: MockupGraphState) -> MockupGraphState:
 
 
 # ============================================================================
-# TWO LANGGRAPH WORKFLOWS
+# UNIFIED LANGGRAPH WORKFLOW
 # ============================================================================
 
-# Analysis workflow (before HITL)
-analysis_workflow = StateGraph(MockupGraphState)
-analysis_workflow.add_node("validate_screenshot", validate_and_load_screenshot)
-analysis_workflow.add_node("crop_to_16_9", crop_to_16_9)
-analysis_workflow.add_node("query_openai", query_openai_for_parameters)
-analysis_workflow.add_edge(START, "validate_screenshot")
-analysis_workflow.add_edge("validate_screenshot", "crop_to_16_9")
-analysis_workflow.add_edge("crop_to_16_9", "query_openai")
-analysis_workflow.add_edge("query_openai", END)
-analysis_graph = analysis_workflow.compile()
+# Single unified graph (Analysis → HITL → Generation)
+workflow = StateGraph(MockupGraphState)
 
-# Generation workflow (after HITL)
-generation_workflow = StateGraph(MockupGraphState)
-generation_workflow.add_node("parallel_generation", parallel_mockup_generation_node)
-generation_workflow.add_node("upload_all", upload_all_to_spaces_node)
-generation_workflow.add_node("cleanup", cleanup_temp_files)
-generation_workflow.add_edge(START, "parallel_generation")
-generation_workflow.add_edge("parallel_generation", "upload_all")
-generation_workflow.add_edge("upload_all", "cleanup")
-generation_workflow.add_edge("cleanup", END)
-generation_graph = generation_workflow.compile()
+# Add all 7 nodes
+workflow.add_node("validate_screenshot", validate_and_load_screenshot)
+workflow.add_node("crop_to_16_9", crop_to_16_9)
+workflow.add_node("query_openai", query_openai_for_parameters)
+workflow.add_node("hitl_validation", hitl_parameter_validation_node)
+workflow.add_node("parallel_generation", parallel_mockup_generation_node)
+workflow.add_node("upload_all", upload_all_to_spaces_node)
+workflow.add_node("cleanup", cleanup_temp_files)
+
+# Define sequential edges
+workflow.add_edge(START, "validate_screenshot")
+workflow.add_edge("validate_screenshot", "crop_to_16_9")
+workflow.add_edge("crop_to_16_9", "query_openai")
+workflow.add_edge("query_openai", "hitl_validation")
+workflow.add_edge("hitl_validation", "parallel_generation")
+workflow.add_edge("parallel_generation", "upload_all")
+workflow.add_edge("upload_all", "cleanup")
+workflow.add_edge("cleanup", END)
+
+# Compile single graph
+unified_graph = workflow.compile()
 
 
 # ============================================================================
@@ -728,29 +810,18 @@ generation_graph = generation_workflow.compile()
 
 
 @app.lock(name="parameter_confirmation")
-async def collect_parameter_feedback(
-    request: fastapi.Request, inputs: Optional[dict] = None
-):
-    """HITL form for parameter confirmation/editing"""
+async def collect_parameter_feedback(data: dict):
+    """HITL form for parameter confirmation/editing
 
-    # Pre-fill with AI-detected values from inputs dict
-    ai_device = (
-        inputs.get("ai_device", "Apple Pro Display XDR")
-        if inputs
-        else "Apple Pro Display XDR"
-    )
-    ai_interior_style = (
-        inputs.get("ai_interior_style", "modern, minimalist")
-        if inputs
-        else "modern, minimalist"
-    )
-    ai_profession = (
-        inputs.get("ai_profession", "UX designer") if inputs else "UX designer"
-    )
-    ai_mood = (
-        inputs.get("ai_mood", "focused, creative") if inputs else "focused, creative"
-    )
-    ai_time_of_day = inputs.get("ai_time_of_day", "morning") if inputs else "morning"
+    Receives data from tracer.lock() call with AI-detected parameters.
+    """
+
+    # Pre-fill with AI-detected values from data dict (passed from tracer.lock())
+    ai_device = data.get("ai_device", "Apple Pro Display XDR")
+    ai_interior_style = data.get("ai_interior_style", "modern, minimalist")
+    ai_profession = data.get("ai_profession", "UX designer")
+    ai_mood = data.get("ai_mood", "focused, creative")
+    ai_time_of_day = data.get("ai_time_of_day", "morning")
 
     feedback_form = F.Model(
         F.Markdown("""
@@ -798,83 +869,78 @@ async def collect_parameter_feedback(
     return feedback_form
 
 
+@app.lease(name="parameter_confirmation")
+async def process_parameter_feedback(inputs: dict):
+    """Process submitted HITL form data and return to tracer.lock() caller
+
+    Receives form data submitted by the user and returns it to the
+    hitl_parameter_validation_node which will merge with AI suggestions.
+    """
+    return {
+        "device": inputs.get("device", ""),
+        "interior_style": inputs.get("interior_style", ""),
+        "profession": inputs.get("profession", ""),
+        "mood": inputs.get("mood", ""),
+        "time_of_day": inputs.get("time_of_day", ""),
+    }
+
+
 # ============================================================================
-# GALLERY HTML BUILDER
+# GALLERY MARKDOWN BUILDER
 # ============================================================================
 
 
-def build_gallery_html(result: dict) -> HTML:
-    """Build HTML gallery showing all 6 mockups"""
+def build_gallery_markdown(result: dict) -> Markdown:
+    """Build markdown gallery showing all 6 mockups"""
 
-    html = ["<h2>🎉 6 Mockup Variations Generated!</h2>"]
+    md = ["## 🎉 6 Mockup Variations Generated!", ""]
 
     uploaded_mockups = result.get("uploaded_mockups", [])
 
     if not uploaded_mockups:
-        html.append("<p>No mockups were successfully generated.</p>")
-        return HTML("\n".join(html))
+        md.append("No mockups were successfully generated.")
+        return Markdown("\n".join(md))
 
-    html.append(
-        f"<p><strong>{len(uploaded_mockups)} variations</strong> generated and uploaded successfully.</p>"
+    md.append(
+        f"**{len(uploaded_mockups)} variations** generated and uploaded successfully."
     )
+    md.append("")
 
     # Parameters used
-    html.append("<h3>Parameters Used</h3>")
-    html.append(
-        "<table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>"
-    )
-    html.append(
-        "<tr><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Parameter</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Value</th></tr>"
-    )
-    html.append(
-        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Device</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['device']}</td></tr>"
-    )
-    html.append(
-        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Interior Style</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['interior_style']}</td></tr>"
-    )
-    html.append(
-        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Profession</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['profession']}</td></tr>"
-    )
-    html.append(
-        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Mood</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['mood']}</td></tr>"
-    )
-    html.append(
-        f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Time of Day</td><td style='border: 1px solid #ddd; padding: 8px;'>{result['time_of_day']}</td></tr>"
-    )
-    html.append("</table>")
+    md.append("### Parameters Used")
+    md.append("")
+    md.append("| Parameter | Value |")
+    md.append("|---|---|")
+    md.append(f"| Device | {result['device']} |")
+    md.append(f"| Interior Style | {result['interior_style']} |")
+    md.append(f"| Profession | {result['profession']} |")
+    md.append(f"| Mood | {result['mood']} |")
+    md.append(f"| Time of Day | {result['time_of_day']} |")
+    md.append("")
 
     # Gallery of mockups
-    html.append("<h3>Generated Mockups</h3>")
-    html.append(
-        "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-top: 20px;'>"
-    )
+    md.append("### Generated Mockups")
+    md.append("")
 
     for mockup in sorted(uploaded_mockups, key=lambda x: x["variation_index"]):
         idx = mockup["variation_index"]
         url = mockup["public_url"]
         size_mb = mockup["file_size_bytes"] / 1024 / 1024
 
-        html.append(
-            "<div style='border: 2px solid #4CAF50; border-radius: 8px; padding: 15px; background: #f9f9f9;'>"
-        )
-        html.append(f"<h4>Variation {idx + 1}</h4>")
-        html.append(
-            f"<img src='{url}' style='width: 100%; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);' />"
-        )
-        html.append(
-            f"<p style='margin-top: 10px;'><strong>Size:</strong> {size_mb:.2f} MB</p>"
-        )
-        html.append(
-            f"<p><a href='{url}' target='_blank' download style='color: #4CAF50; font-weight: bold;'>⬇️ Download</a></p>"
-        )
-        html.append(
-            f"<p style='font-size: 0.85em; word-break: break-all;'><strong>URL:</strong> <code>{url}</code></p>"
-        )
-        html.append("</div>")
+        md.append(f"#### Variation {idx + 1}")
+        md.append("")
+        md.append(f"![Mockup Variation {idx + 1}]({url})")
+        md.append("")
+        md.append(f"**Size:** {size_mb:.2f} MB")
+        md.append("")
+        md.append(f"[Download]({url})")
+        md.append("")
+        md.append(f"`{url}`")
+        md.append("")
+        md.append("---")
+        md.append("")
 
-    html.append("</div>")
-
-    return HTML("\n".join(html))
+    return Markdown("\n".join(md))
 
 
 # ============================================================================
@@ -883,14 +949,11 @@ def build_gallery_html(result: dict) -> HTML:
 
 
 async def runner(inputs: dict, tracer: Tracer):
-    """Main runner with HITL step"""
+    """Main runner with unified graph"""
 
     await tracer.markdown("# Parallel Mockup Generator with HITL")
 
-    # Phase 1: Upload and analyze
-    await tracer.markdown("## Phase 1: Analysis")
-
-    # Run initial workflow: validate → crop → analyze
+    # Initialize state
     initial_state = {
         "tracer": tracer,
         "screenshot_local_path": None,
@@ -909,75 +972,25 @@ async def runner(inputs: dict, tracer: Tracer):
         "mockup_results": [],
         "uploaded_mockups": [],
         "upload_timestamp": None,
+        "temp_output_dir": None,
         "errors": [],
     }
 
-    # Run analysis workflow (separate graph)
-    analysis_result = await analysis_graph.ainvoke(initial_state)
+    # Phase 1: Analysis
+    await tracer.markdown("## Phase 1: Analysis")
 
-    if analysis_result["errors"]:
-        # Show errors
-        html = ["<h2>❌ Analysis Failed</h2>"]
-        html.append("<ul>")
-        for error in analysis_result["errors"]:
-            html.append(f"<li>{error}</li>")
-        html.append("</ul>")
-        return HTML("\n".join(html))
+    # Single graph execution (handles analysis + HITL + generation)
+    result = await unified_graph.ainvoke(initial_state)
 
-    # Phase 2: HITL - Show AI recommendations and collect feedback
-    await tracer.markdown("## Phase 2: Human-in-the-Loop Parameter Confirmation")
-    await tracer.markdown("📊 **AI-Detected Parameters:**")
-    await tracer.markdown(f"- **Device:** {analysis_result['ai_device']}")
-    await tracer.markdown(
-        f"- **Interior Style:** {analysis_result['ai_interior_style']}"
-    )
-    await tracer.markdown(f"- **Profession:** {analysis_result['ai_profession']}")
-    await tracer.markdown(f"- **Mood:** {analysis_result['ai_mood']}")
-    await tracer.markdown(f"- **Time of Day:** {analysis_result['ai_time_of_day']}")
-    await tracer.markdown("")
-    await tracer.markdown("👉 Please review and edit the parameters below...")
+    # Check for errors
+    if result["errors"]:
+        md = ["## ❌ Process Failed", ""]
+        for error in result["errors"]:
+            md.append(f"- {error}")
+        return Markdown("\n".join(md))
 
-    # Pause for human feedback - pass AI values to the lock form
-    feedback = await tracer.lock(
-        "parameter_confirmation",
-        {
-            "ai_device": analysis_result["ai_device"],
-            "ai_interior_style": analysis_result["ai_interior_style"],
-            "ai_profession": analysis_result["ai_profession"],
-            "ai_mood": analysis_result["ai_mood"],
-            "ai_time_of_day": analysis_result["ai_time_of_day"],
-        },
-    )
-
-    # Extract final parameters from feedback
-    analysis_result["device"] = feedback.get("device", analysis_result["ai_device"])
-    analysis_result["interior_style"] = feedback.get(
-        "interior_style", analysis_result["ai_interior_style"]
-    )
-    analysis_result["profession"] = feedback.get(
-        "profession", analysis_result["ai_profession"]
-    )
-    analysis_result["mood"] = feedback.get("mood", analysis_result["ai_mood"])
-    analysis_result["time_of_day"] = feedback.get(
-        "time_of_day", analysis_result["ai_time_of_day"]
-    )
-
-    await tracer.markdown("## Phase 3: Parallel Generation")
-    await tracer.markdown("✅ Parameters confirmed, starting parallel generation...")
-
-    # Phase 3: Run generation workflow
-    generation_result = await generation_graph.ainvoke(analysis_result)
-
-    if generation_result["errors"]:
-        html = ["<h2>❌ Generation Failed</h2>"]
-        html.append("<ul>")
-        for error in generation_result["errors"]:
-            html.append(f"<li>{error}</li>")
-        html.append("</ul>")
-        return HTML("\n".join(html))
-
-    # Build HTML response with all 6 mockups
-    return build_gallery_html(generation_result)
+    # Build markdown response with all 6 mockups
+    return build_gallery_markdown(result)
 
 
 # ============================================================================
