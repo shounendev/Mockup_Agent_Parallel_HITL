@@ -440,8 +440,6 @@ async def query_openai_for_parameters(state: MockupGraphState) -> MockupGraphSta
         }
         mime_type = format_to_mime.get(img_format, "image/jpeg")  # Default to jpeg
 
-        await tracer.markdown(f"**Debug - Image format:** {img_format}, MIME type: {mime_type}")
-
         with open(screenshot_path, "rb") as image_file:
             image_data = base64.b64encode(image_file.read()).decode("utf-8")
             image_url = f"data:{mime_type};base64,{image_data}"
@@ -468,9 +466,6 @@ Respond ONLY with valid JSON:
 
         response = await llm.ainvoke([message])
         content = response.content
-
-        # Debug: log the raw response
-        await tracer.markdown(f"**Debug - Raw API response:** {content[:200]}")
 
         # Parse JSON
         start = content.find("{")
@@ -504,6 +499,80 @@ Respond ONLY with valid JSON:
         state["ai_time_of_day"] = "morning"
 
         return state
+
+
+async def adjust_parameters_with_llm(
+    ai_device: str,
+    ai_interior_style: str,
+    ai_profession: str,
+    ai_mood: str,
+    ai_time_of_day: str,
+    adjustment_text: str,
+    tracer: Tracer,
+) -> dict:
+    """Use LLM to adjust parameters based on user's natural language input"""
+
+    try:
+        llm = ChatOpenAI(
+            model="gpt-4o",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.7
+        )
+
+        prompt = f"""You are adjusting mockup generation parameters based on user feedback.
+
+Original AI-detected parameters:
+- Device: {ai_device}
+- Interior Style: {ai_interior_style}
+- Profession: {ai_profession}
+- Mood: {ai_mood}
+- Time of Day: {ai_time_of_day}
+
+User's adjustment request: "{adjustment_text}"
+
+Based on the user's request, adjust the parameters appropriately. If the user doesn't mention a parameter, keep the original value.
+
+Respond ONLY with valid JSON:
+{{
+  "device": "adjusted device name",
+  "interior_style": "adjusted interior style",
+  "profession": "adjusted profession",
+  "mood": "adjusted mood",
+  "time_of_day": "adjusted time (morning/afternoon/evening/night)"
+}}"""
+
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        content = response.content
+
+        # Parse JSON
+        start = content.find("{")
+        end = content.rfind("}") + 1
+
+        if start == -1 or end == 0:
+            raise ValueError("No JSON found in LLM response")
+
+        params = json.loads(content[start:end])
+
+        return {
+            "device": params.get("device", ai_device),
+            "interior_style": params.get("interior_style", ai_interior_style),
+            "profession": params.get("profession", ai_profession),
+            "mood": params.get("mood", ai_mood),
+            "time_of_day": params.get("time_of_day", ai_time_of_day),
+        }
+
+    except Exception as e:
+        await tracer.markdown(f"⚠️ Parameter adjustment failed: {str(e)}")
+        await tracer.markdown("Using original AI parameters")
+
+        # Fallback to original AI parameters
+        return {
+            "device": ai_device,
+            "interior_style": ai_interior_style,
+            "profession": ai_profession,
+            "mood": ai_mood,
+            "time_of_day": ai_time_of_day,
+        }
 
 
 async def hitl_parameter_validation_node(state: MockupGraphState) -> MockupGraphState:
@@ -544,12 +613,40 @@ async def hitl_parameter_validation_node(state: MockupGraphState) -> MockupGraph
         },
     )
 
-    # Merge feedback with AI suggestions
-    state["device"] = feedback.get("device", state["ai_device"])
-    state["interior_style"] = feedback.get("interior_style", state["ai_interior_style"])
-    state["profession"] = feedback.get("profession", state["ai_profession"])
-    state["mood"] = feedback.get("mood", state["ai_mood"])
-    state["time_of_day"] = feedback.get("time_of_day", state["ai_time_of_day"])
+    # Check if user provided adjustment instructions
+    adjustment = feedback.get("adjustment", "").strip()
+
+    if adjustment:
+        # User wants to adjust parameters - use LLM to interpret
+        await tracer.markdown(f"🔄 Adjusting parameters based on: '{adjustment}'")
+
+        adjusted_params = await adjust_parameters_with_llm(
+            state["ai_device"],
+            state["ai_interior_style"],
+            state["ai_profession"],
+            state["ai_mood"],
+            state["ai_time_of_day"],
+            adjustment,
+            tracer,
+        )
+
+        # Use adjusted parameters
+        state["device"] = adjusted_params["device"]
+        state["interior_style"] = adjusted_params["interior_style"]
+        state["profession"] = adjusted_params["profession"]
+        state["mood"] = adjusted_params["mood"]
+        state["time_of_day"] = adjusted_params["time_of_day"]
+
+        await tracer.markdown("✅ Parameters adjusted successfully")
+    else:
+        # No adjustment - use AI parameters as-is
+        state["device"] = state["ai_device"]
+        state["interior_style"] = state["ai_interior_style"]
+        state["profession"] = state["ai_profession"]
+        state["mood"] = state["ai_mood"]
+        state["time_of_day"] = state["ai_time_of_day"]
+
+        await tracer.markdown("✅ Using AI-detected parameters as-is")
 
     await tracer.markdown("## Phase 3: Parallel Generation")
     await tracer.markdown("✅ Parameters confirmed, starting parallel generation...")
@@ -811,12 +908,12 @@ unified_graph = workflow.compile()
 
 @app.lock(name="parameter_confirmation")
 async def collect_parameter_feedback(data: dict):
-    """HITL form for parameter confirmation/editing
+    """HITL form showing AI analysis and single adjustment field
 
     Receives data from tracer.lock() call with AI-detected parameters.
     """
 
-    # Pre-fill with AI-detected values from data dict (passed from tracer.lock())
+    # Get AI-detected values from data dict
     ai_device = data.get("ai_device", "Apple Pro Display XDR")
     ai_interior_style = data.get("ai_interior_style", "modern, minimalist")
     ai_profession = data.get("ai_profession", "UX designer")
@@ -825,42 +922,33 @@ async def collect_parameter_feedback(data: dict):
 
     feedback_form = F.Model(
         F.Markdown("""
-        ## Review AI-Detected Parameters
+        ## AI Analysis Results
 
-        The AI has analyzed your screenshot. Review and edit the parameters below, then submit to generate 6 mockup variations.
+        The AI analyzed your screenshot and detected the following parameters:
         """),
-        F.InputText(
-            name="device",
-            label="Display Device",
-            value=ai_device,
-            placeholder="e.g., Apple Pro Display XDR",
-        ),
-        F.InputText(
-            name="interior_style",
-            label="Interior Style",
-            value=ai_interior_style,
-            placeholder="e.g., minimalist modern, cozy creative",
-        ),
-        F.InputText(
-            name="profession",
-            label="Space Owner Profession",
-            value=ai_profession,
-            placeholder="e.g., UX designer, software developer",
-        ),
-        F.InputText(
-            name="mood",
-            label="Atmosphere/Mood",
-            value=ai_mood,
-            placeholder="e.g., bright and inspiring, focused and calm",
-        ),
-        F.InputText(
-            name="time_of_day",
-            label="Time of Day (Base)",
-            value=ai_time_of_day,
-            placeholder="morning, afternoon, evening, night",
-        ),
-        F.Markdown(
-            "**Note:** 6 variations will be generated with slight modifications to these base parameters."
+        F.Markdown(f"""
+        - **Device:** {ai_device}
+        - **Interior Style:** {ai_interior_style}
+        - **Profession:** {ai_profession}
+        - **Mood:** {ai_mood}
+        - **Time of Day:** {ai_time_of_day}
+        """),
+        F.Markdown("""
+        ---
+
+        ### Adjustments (Optional)
+
+        If you'd like to modify these parameters, describe your changes below.
+        For example: "make it more modern and professional" or "change to evening time, warmer mood"
+
+        Leave blank to use the AI-detected parameters as-is.
+        """),
+        F.InputArea(
+            name="adjustment",
+            label="Adjustment Instructions",
+            placeholder="e.g., make it more modern and professional, change to evening...",
+            value="",
+            rows=3,
         ),
         F.Submit("Generate 6 Mockups"),
         F.Cancel("Cancel"),
@@ -873,15 +961,11 @@ async def collect_parameter_feedback(data: dict):
 async def process_parameter_feedback(inputs: dict):
     """Process submitted HITL form data and return to tracer.lock() caller
 
-    Receives form data submitted by the user and returns it to the
-    hitl_parameter_validation_node which will merge with AI suggestions.
+    Receives form data submitted by the user (adjustment text) and returns it to the
+    hitl_parameter_validation_node which will use LLM to adjust parameters if provided.
     """
     return {
-        "device": inputs.get("device", ""),
-        "interior_style": inputs.get("interior_style", ""),
-        "profession": inputs.get("profession", ""),
-        "mood": inputs.get("mood", ""),
-        "time_of_day": inputs.get("time_of_day", ""),
+        "adjustment": inputs.get("adjustment", "").strip(),
     }
 
 
