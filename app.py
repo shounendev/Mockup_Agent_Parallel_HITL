@@ -119,7 +119,7 @@ The screenshot should be the brightest element in the scene, with natural lighti
 # ============================================================================
 
 
-@ray.remote
+@ray.remote(num_cpus=0.1)
 def generate_single_mockup(
     prompt: str,
     cropped_screenshot_path: str,
