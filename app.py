@@ -514,9 +514,7 @@ async def adjust_parameters_with_llm(
 
     try:
         llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.7
+            model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"), temperature=0.7
         )
 
         prompt = f"""You are adjusting mockup generation parameters based on user feedback.
@@ -924,24 +922,14 @@ async def collect_parameter_feedback(data: dict):
         F.Markdown("""
         ## AI Analysis Results
 
-        The AI analyzed your screenshot and detected the following parameters:
+        The Agent analyzed your screenshot and recommends the following parameters:
         """),
         F.Markdown(f"""
-        - **Device:** {ai_device}
-        - **Interior Style:** {ai_interior_style}
-        - **Profession:** {ai_profession}
-        - **Mood:** {ai_mood}
+        - **Device:** {ai_device} \n
+        - **Interior Style:** {ai_interior_style} \n
+        - **Profession:** {ai_profession} \n
+        - **Mood:** {ai_mood} \n
         - **Time of Day:** {ai_time_of_day}
-        """),
-        F.Markdown("""
-        ---
-
-        ### Adjustments (Optional)
-
-        If you'd like to modify these parameters, describe your changes below.
-        For example: "make it more modern and professional" or "change to evening time, warmer mood"
-
-        Leave blank to use the AI-detected parameters as-is.
         """),
         F.InputArea(
             name="adjustment",
