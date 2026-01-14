@@ -25,8 +25,6 @@ import uuid
 import mimetypes
 import base64
 import json
-from google import genai
-from google.genai import types
 import ray
 import asyncio
 
@@ -115,6 +113,50 @@ The screenshot should be the brightest element in the scene, with natural lighti
 
 
 # ============================================================================
+# HELPER: UPLOAD SCREENSHOT FOR FAL.AI
+# ============================================================================
+
+
+def upload_screenshot_for_fal(screenshot_path: str) -> str:
+    """
+    Upload screenshot to Digital Ocean Spaces and return public URL.
+    Required because fal.ai needs publicly accessible image URLs.
+    """
+    spaces_endpoint = os.getenv("SPACES_ENDPOINT")
+    spaces_key = os.getenv("SPACES_KEY")
+    spaces_secret = os.getenv("SPACES_SECRET")
+    bucket_name = os.getenv("SPACES_BUCKET")
+    spaces_region = os.getenv("SPACES_REGION", "fra1")
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=spaces_endpoint,
+        aws_access_key_id=spaces_key,
+        aws_secret_access_key=spaces_secret,
+        region_name=spaces_region,
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = str(uuid.uuid4())[:8]
+    s3_key = f"screenshots/input_{timestamp}_{unique_id}.png"
+
+    with open(screenshot_path, "rb") as f:
+        s3_client.upload_fileobj(
+            f,
+            bucket_name,
+            s3_key,
+            ExtraArgs={
+                "ACL": "public-read",
+                "ContentType": "image/png",
+                "CacheControl": "max-age=3600",
+            },
+        )
+
+    public_url = f"{spaces_endpoint}/{bucket_name}/{s3_key}"
+    return public_url
+
+
+# ============================================================================
 # RAY REMOTE FUNCTION FOR PARALLEL GENERATION
 # ============================================================================
 
@@ -122,70 +164,75 @@ The screenshot should be the brightest element in the scene, with natural lighti
 @ray.remote(num_cpus=0.1)
 def generate_single_mockup(
     prompt: str,
-    cropped_screenshot_path: str,
-    gemini_api_key: str,
+    screenshot_url: str,
+    fal_api_key: str,
     variation_index: int,
     output_dir: str,
 ) -> dict:
     """
-    Ray remote function to generate a single mockup.
+    Ray remote function to generate a single mockup using fal.ai nano-banana.
     Writes to disk immediately, returns dict with file path (NOT image data).
     """
-    from google import genai
-    from google.genai import types
-    from PIL import Image
-    import mimetypes
+    import httpx
     import os
     from datetime import datetime
     import uuid
-    import dotenv
-
-    dotenv.load_dotenv()
 
     try:
-        client = genai.Client(api_key=gemini_api_key)
-        model = "gemini-3-pro-image-preview"
+        # Call fal.ai /edit endpoint
+        response = httpx.post(
+            "https://fal.run/fal-ai/nano-banana-pro/edit",
+            headers={
+                "Authorization": f"Key {fal_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "prompt": prompt,
+                "image_urls": [screenshot_url],
+                "num_images": 1,
+                "aspect_ratio": "16:9",
+                "resolution": "2K",
+                "output_format": "png",
+            },
+            timeout=300.0,
+        )
 
-        with Image.open(cropped_screenshot_path) as cropped_screenshot:
-            contents = [prompt, cropped_screenshot]
-
-            tools = [types.Tool(googleSearch=types.GoogleSearch())]
-            generate_content_config = types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-                image_config=types.ImageConfig(image_size="2K"),
-                tools=tools,
-            )
-
-            mockup_data = None
-            mockup_mime = None
-
-            for chunk in client.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=generate_content_config,
-            ):
-                if (
-                    chunk.candidates
-                    and chunk.candidates[0].content
-                    and chunk.candidates[0].content.parts
-                    and chunk.candidates[0].content.parts[0].inline_data
-                    and chunk.candidates[0].content.parts[0].inline_data.data
-                ):
-                    inline_data = chunk.candidates[0].content.parts[0].inline_data
-                    mockup_data = inline_data.data
-                    mockup_mime = inline_data.mime_type
-
-        if not mockup_data:
+        if response.status_code != 200:
             return {
                 "variation_index": variation_index,
                 "success": False,
-                "error": "No image data received from Gemini",
+                "error": f"fal.ai API error: {response.status_code} - {response.text}",
                 "file_path": None,
                 "mime": None,
             }
 
-        file_extension = mimetypes.guess_extension(mockup_mime)
-        mockup_format = file_extension.lstrip(".") if file_extension else "jpeg"
+        result = response.json()
+
+        if not result.get("images") or len(result["images"]) == 0:
+            return {
+                "variation_index": variation_index,
+                "success": False,
+                "error": "No image data received from fal.ai",
+                "file_path": None,
+                "mime": None,
+            }
+
+        # Download the generated image
+        image_url = result["images"][0]["url"]
+        image_response = httpx.get(image_url, timeout=60.0)
+
+        if image_response.status_code != 200:
+            return {
+                "variation_index": variation_index,
+                "success": False,
+                "error": f"Failed to download image: {image_response.status_code}",
+                "file_path": None,
+                "mime": None,
+            }
+
+        mockup_data = image_response.content
+        mockup_mime = result["images"][0].get("content_type", "image/png")
+        mockup_format = "png"
 
         # Write to disk immediately - do NOT hold in memory
         os.makedirs(output_dir, exist_ok=True)
@@ -206,7 +253,7 @@ def generate_single_mockup(
             "variation_index": variation_index,
             "success": True,
             "error": None,
-            "file_path": file_path,  # Return path, NOT data
+            "file_path": file_path,
             "mime": mockup_mime,
             "format": mockup_format,
             "size_bytes": file_size,
@@ -675,9 +722,14 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
 
     prompts = generate_prompt_variations(base_params, prompt_template)
 
-    # Launch 6 Ray remote tasks
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    # Upload screenshot to get a public URL for fal.ai
+    await tracer.markdown("📤 Uploading screenshot for fal.ai...")
     cropped_path = state["cropped_screenshot_path"]
+    screenshot_url = upload_screenshot_for_fal(cropped_path)
+    await tracer.markdown("✅ Screenshot uploaded")
+
+    # Launch 6 Ray remote tasks
+    fal_api_key = os.getenv("FAL_KEY")
 
     # Create temporary output directory for generated images
     from datetime import datetime
@@ -689,10 +741,10 @@ async def parallel_mockup_generation_node(state: MockupGraphState) -> MockupGrap
     futures = [
         generate_single_mockup.remote(
             prompt=prompts[i],
-            cropped_screenshot_path=cropped_path,
-            gemini_api_key=gemini_api_key,
+            screenshot_url=screenshot_url,
+            fal_api_key=fal_api_key,
             variation_index=i,
-            output_dir=temp_output_dir,  # Pass output directory to write files
+            output_dir=temp_output_dir,
         )
         for i in range(6)
     ]
